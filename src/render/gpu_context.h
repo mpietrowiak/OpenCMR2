@@ -81,12 +81,25 @@ struct GpuContext {
     static int TextureKind(const GfxStageState &stage);
 
     // Shows a picture of renderW x renderH pixels, drawn for gameW x gameH,
-    // in the window (letterboxed unless stretched), after reading back the
-    // lens flare test area. Submits cmd.
+    // in the window (letterboxed unless stretched), and reads back the lens
+    // flare test area. Submits cmd. The area read reaches the game a frame or
+    // two later, when the GPU is done with it: waiting for it would stop the
+    // CPU from preparing the next frame while the GPU draws this one.
     void Present(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *picture, int renderW, int renderH, int gameW, int gameH,
                  GfxReadback &readback, bool vsync, bool stretch);
 
 private:
+    // A read back of the lens flare test area the GPU has not finished yet.
+    struct PendingReadback {
+        SDL_GPUTransferBuffer *buffer = nullptr;
+        SDL_GPUFence *fence = nullptr;
+        int readW = 0, readH = 0;   // picture pixels read
+        int w = 0, h = 0;           // game pixels asked for
+    } pendingReadback;
+    // Hands the pending read back to the game when the GPU is done with it
+    // (or, with wait, once it is).
+    void CollectReadback(GfxReadback &readback, bool wait);
+
     SDL_GPUDevice *CreateDevice(SDL_GPUShaderFormat formats, bool debug, bool withAnisotropy);
     SDL_GPUTextureFormat GpuFormat(int format, bool &cpuDecode);
     size_t UploadSize(GfxTexture *t, GpuTexture *g, int w, int h);

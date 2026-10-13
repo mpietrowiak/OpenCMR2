@@ -88,6 +88,7 @@ struct GfxDrawState {
     DWORD textureFactor = 0xffffffff;
     GfxStageState stages[2];
     GfxViewport viewport;
+    DWORD shadowFlags = 0;      // GFX_SHADOW_*
 };
 
 enum GfxCommandType {
@@ -154,7 +155,17 @@ struct GfxExecutor {
     virtual void DestroyVertexBuffer(GfxVertexBuffer *buffer) = 0;
     // Brings a render target's pixels back into its CPU copy (for locks).
     virtual void ReadTexture(GfxTexture *texture) = 0;
+    // Whether the last frame's scene had shadows from the sun.
+    virtual bool CastsSunShadows() const { return false; }
+    // Whether the frame being recorded should carry the stage's shadow
+    // casters off screen (Gfx_ShadowCastersWanted).
+    virtual bool ShadowCastersWanted() const { return false; }
+    virtual void ToggleRemaster() {}
 };
+
+// The game's baked light ramp (Gfx_SetBakedLightRamp): false before the game
+// set one.
+bool Gfx_BakedLightRamp(DWORD &shade, DWORD &light);
 
 // The renderer video.renderer selects: classic or modern.
 GfxExecutor *Gfx_CreateClassicExecutor(void);

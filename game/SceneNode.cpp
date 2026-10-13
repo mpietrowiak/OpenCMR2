@@ -803,6 +803,8 @@ void Scene_BuildLightTables(void)
             i++;
             pShadow++;
         } while (i < 50);
+        // PORT: the renderer's remaster takes this light out of the stage.
+        Gfx_SetBakedLightRamp(g_sceneLightTableD3D[0], g_sceneLightTableD3D[49]);
     }
 }
 
@@ -2366,6 +2368,11 @@ void Scene_DrawShadowBatches(unsigned int view)
     BYTE mask;
 
     if ((unsigned int)g_shadowVertexCount <= 0)
+        return;
+    // PORT: with shadows cast from the sun (the remaster renderer), the cars'
+    // projected shadows are left out: the sun's already fall there, in its
+    // own direction.
+    if (Gfx_CastsSunShadows())
         return;
     CGraphics::SetZWriteEnable(0);
     CGraphics::SetCullMode(1);

@@ -254,6 +254,40 @@ void Gfx_PopState(void);
    or, with NULL, the back buffer. */
 void Gfx_SetRenderTarget(GfxTexture *target);
 
+/* Whether the renderer cast shadows from the sun in the last frame (the
+   remaster): the game then leaves out the shadows it paints under the cars. */
+BOOL Gfx_CastsSunShadows(void);
+
+/* How the next draws take part in the sun's shadows (the remaster). Flags:
+   static: the stage, which stays where it is: drawn into shadow maps the
+   renderer keeps from frame to frame (the rest is drawn into one made every
+   frame); billboard: geometry the game turns about the vertical to face the
+   camera (trees), turned to face the sun in the shadow maps so its shadow
+   keeps its width; shadow only: casts shadows but is not drawn (the stage
+   the game culls off screen near the camera). Draws with shadow only are
+   dropped when Gfx_CastsSunShadows is false. */
+enum {
+    GFX_SHADOW_BILLBOARD = 1,
+    GFX_SHADOW_ONLY = 2,
+    GFX_SHADOW_STATIC = 4
+};
+void Gfx_SetShadowMode(DWORD flags);
+
+/* Whether the renderer draws its kept shadow maps again in the frame being
+   recorded: the game then draws the stage it culls near the camera for them
+   (GFX_SHADOW_ONLY), which other frames do not need. */
+BOOL Gfx_ShadowCastersWanted(void);
+
+/* Switches the remaster on or off (Ctrl+G), to compare it with the
+   original picture. Not saved. */
+void Gfx_ToggleRemaster(void);
+
+/* The colours the game bakes the light of its stages into the vertices with
+   (D3D ARGB): in full shade and in full light, the levels in between on the
+   line between them. The remaster takes that light out of the stage's
+   colours and lights it with the sun and its shadows instead. */
+void Gfx_SetBakedLightRamp(DWORD shade, DWORD light);
+
 /* ---- fixed-function state -------------------------------------------------- */
 
 void Gfx_SetTransform(int type, const GfxMatrix *matrix);

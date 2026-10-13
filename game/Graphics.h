@@ -1494,6 +1494,7 @@ private:
     friend void Game_DrawViewMaskNodes(SceneNode *pNode, int bit);
     friend void Game_DrawViewMaskNode(SceneNode *pNode, int bit);
     friend void Game_DrawDeferredObjects(void);
+    friend void Game_DrawShadowCasterSectors(void);
     friend int Graphics_RenderNodeCubeMapFaces(SceneNode *pNode, int bit);
     friend int Game_DrawSceneViewport(struct SceneNode *pRoot, struct SceneNode *pCamera, void *pRect, int bit, BYTE flag);
 };

@@ -417,7 +417,8 @@ void CarContact_BuildBodyPatch(Car *pCar, CarContact *pContact)
     *(DWORD *)vertices[0].colour = *(DWORD *)(c0); \
     *(DWORD *)vertices[1].colour = *(DWORD *)(c1); \
     *(DWORD *)vertices[2].colour = *(DWORD *)(c2); \
-    Quad2D_QueueFixedTriangle(0, &vertices[0], &vertices[1], &vertices[2], NULL, 10)
+    if (paintShadow)                           \
+        Quad2D_QueueFixedTriangle(0, &vertices[0], &vertices[1], &vertices[2], NULL, 10)
 
 // Octagon around the body patch (its corners cut at 5% / 95% of each edge)
 // and the solid core, 60% of its size.
@@ -470,6 +471,10 @@ void CarPhysics_DrawBodyWheelAndSkidShadows(Car *pCar, int view)
     int t;
     short total;
     short n;
+    // PORT: with shadows cast from the sun (the remaster renderer), the
+    // painted shadow is left out; the wheel patch points are still kept for
+    // the tyre marks.
+    BOOL paintShadow = !Gfx_CastsSunShadows();
 
     colour[0] = 0;
     colour[1] = 0;

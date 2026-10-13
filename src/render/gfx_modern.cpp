@@ -9,17 +9,26 @@
 // - Alpha-tested draws (foliage, fences, spectators) get anti-aliased edges
 //   through alpha to coverage; textures are filtered anisotropically
 //   (video.anisotropy, 8 by default).
+// - With video.lighting = pixel, the fixed-function lighting is evaluated
+//   per pixel instead of per vertex: lights (headlights on the stage, the
+//   sun on the cars) no longer follow the triangles. Baked colours are still
+//   interpolated from the vertices.
 // - Stage geometry stays on the GPU (gfx_core.cpp draws it by reference).
+// - With video.graphics = remaster, the 3D part of the frame is drawn into an
+//   HDR scene target, lit and shadowed by the sun, and the screen effects
+//   make the picture from it before the HUD is drawn over it
+//   (gfx_remaster.cpp).
 // - Shader data is split by how often it changes (transform, lighting,
 //   texture coordinates, texture stages) and each block is pushed only when
 //   it changed; pipelines, viewports, buffers and textures are bound only
 //   when they change.
 //
-// The shaders compute what the classic renderer's do: the picture is the
-// original's, only sharper.
+// With per-vertex lighting the shaders compute what the classic renderer's
+// do: the picture is the original's, only sharper.
 
 #include "platform/platform.h"
 #include "port/sys.h"
+#include "render/gfx_remaster.h"
 #include "render/gpu_context.h"
 #include "render/presentation.h"
 
@@ -58,7 +67,7 @@ struct LightingUniforms {
     int32_t lightFlags[4];
     int32_t sources[4];
     int32_t fogFlags[4];
-    float fogParams[4];
+    float fogRange[4];
 };
 
 struct TexGenUniforms {
@@ -76,6 +85,7 @@ struct CombinerUniforms {
     float fogParams[4];
     float bumpMatrix[4];
     float bumpLuminance[4];
+    int32_t remaster[4];    // RemasterSurface, -, -, -
 };
 
 struct ClearUniforms {
@@ -101,6 +111,11 @@ struct Pushed {
 
 struct ModernExecutor : GfxExecutor {
     GpuContext gpu;
+    Remaster remaster{ gpu };
+    // Where the back buffer's drawing goes in this frame (remaster): before
+    // the scene (to the back buffer), in the scene (the HDR scene target),
+    // after it (the effects have run; the HUD goes to the back buffer).
+    enum Phase { BEFORE_SCENE, IN_SCENE, AFTER_SCENE } phase = BEFORE_SCENE;
     SDL_GPUShader *vs3d = nullptr, *vsTL = nullptr, *fs = nullptr, *vsClear = nullptr, *fsClear = nullptr;
     // backColor: the picture shown, one sample per pixel; with multisampling
     // the passes draw to backMsaa and resolve into it.
@@ -110,6 +125,7 @@ struct ModernExecutor : GfxExecutor {
     SDL_GPUSampleCount backSamples = SDL_GPU_SAMPLECOUNT_1;
     SDL_GPUSampleCount wantedSamples = SDL_GPU_SAMPLECOUNT_1;   // video.msaa, as supported
     int renderScale = 100;                                      // video.render_scale
+    bool pixelLightingSetting = false;                          // video.lighting = pixel
     std::unordered_map<uint32_t, SDL_GPUGraphicsPipeline *> pipelines;
 
     ~ModernExecutor() override
@@ -136,11 +152,14 @@ struct ModernExecutor : GfxExecutor {
         Sys_Log("gfx: modern renderer");
         wantedSamples = BackSamples();
         renderScale = std::max(25, std::min(400, Platform_GetSettingInt("video.render_scale", 100)));
+        pixelLightingSetting = SDL_strcasecmp(Platform_GetSetting("video.lighting", "vertex"), "pixel") == 0;
         vs3d = gpu.Shader(SHADER_CODE(modern3d_vert), SDL_GPU_SHADERSTAGE_VERTEX, 0, 3);
         vsTL = gpu.Shader(SHADER_CODE(moderntl_vert), SDL_GPU_SHADERSTAGE_VERTEX, 0, 3);
-        fs = gpu.Shader(SHADER_CODE(modern_frag), SDL_GPU_SHADERSTAGE_FRAGMENT, 4, 1);
+        fs = gpu.Shader(SHADER_CODE(modern_frag), SDL_GPU_SHADERSTAGE_FRAGMENT, 4 + Remaster::kSceneTextureCount, 3);
         vsClear = gpu.Shader(SHADER_CODE(clear_vert), SDL_GPU_SHADERSTAGE_VERTEX, 0, 1);
         fsClear = gpu.Shader(SHADER_CODE(clear_frag), SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1);
+        if (!remaster.Create())
+            return false;
         return vs3d && vsTL && fs && vsClear && fsClear;
     }
 
@@ -175,8 +194,27 @@ struct ModernExecutor : GfxExecutor {
     }
 
     void DestroyTexture(GfxTexture *t) override { gpu.DestroyTexture(t); }
-    void DestroyVertexBuffer(GfxVertexBuffer *b) override { gpu.DestroyVertexBuffer(b); }
+    void DestroyVertexBuffer(GfxVertexBuffer *b) override
+    {
+        // Another buffer may come at its address.
+        remaster.ForgetVertexBuffers();
+        gpu.DestroyVertexBuffer(b);
+    }
     void ReadTexture(GfxTexture *t) override { gpu.ReadTexture(t); }
+    bool CastsSunShadows() const override { return remaster.ShadowsOn(); }
+    bool ShadowCastersWanted() const override { return remaster.ShadowCastersWanted(); }
+
+    void ToggleRemaster() override
+    {
+        // The back buffer follows at the next frame (EnsureBackBuffer).
+        if (!remaster.SetEnabled(!remaster.settings.enabled))
+            remaster.SetEnabled(false);
+        phase = BEFORE_SCENE;
+    }
+
+    // The remaster's lighting of the scene starts from the game's colours
+    // per pixel.
+    bool PixelLighting() const { return pixelLightingSetting || phase == IN_SCENE; }
 
     // ---- back buffer ----
 
@@ -214,7 +252,7 @@ struct ModernExecutor : GfxExecutor {
         RenderSize(w, h);
         SDL_GPUSampleCount samples = wantedSamples;
         if (backColor != NULL && renderWidth == w && renderHeight == h && backSamples == samples)
-            return true;
+            return !remaster.settings.enabled || remaster.EnsureTargets(w, h, samples);
         SDL_WaitForGPUIdle(gpu.device);
         SDL_ReleaseGPUTexture(gpu.device, backColor);
         SDL_ReleaseGPUTexture(gpu.device, backMsaa);
@@ -232,6 +270,8 @@ struct ModernExecutor : GfxExecutor {
         backSamples = samples;
         if (backColor == NULL || backDepth == NULL || (samples != SDL_GPU_SAMPLECOUNT_1 && backMsaa == NULL))
             return false;
+        if (remaster.settings.enabled && !remaster.EnsureTargets(w, h, samples))
+            return false;
         Sys_Log("gfx: %dx%d drawn at %dx%d, %d samples", backWidth, backHeight, w, h,
                 samples == SDL_GPU_SAMPLECOUNT_8 ? 8 : samples == SDL_GPU_SAMPLECOUNT_4 ? 4
                 : samples == SDL_GPU_SAMPLECOUNT_2 ? 2 : 1);
@@ -240,22 +280,25 @@ struct ModernExecutor : GfxExecutor {
 
     // ---- pipelines ----
 
-    // Alpha-tested draws that do not blend get anti-aliased edges from their
-    // alpha when multisampling.
-    static bool AlphaToCoverage(const GfxDrawState &s, SDL_GPUSampleCount samples)
+    // Alpha-tested 3D draws that do not blend (foliage, fences) get
+    // anti-aliased edges from their alpha when multisampling. Text and the
+    // HUD keep their hard cut, as drawn for the game's resolution.
+    static bool AlphaToCoverage(const GfxCommand &c, const GfxDrawState &s, SDL_GPUSampleCount samples)
     {
-        return samples != SDL_GPU_SAMPLECOUNT_1 && s.alphaTest && !s.alphaBlend;
+        return samples != SDL_GPU_SAMPLECOUNT_1 && !c.transformed && s.alphaTest && !s.alphaBlend;
     }
 
-    SDL_GPUGraphicsPipeline *Pipeline(const GfxCommand &cmd, const GfxDrawState &s, SDL_GPUSampleCount samples)
+    SDL_GPUGraphicsPipeline *Pipeline(const GfxCommand &cmd, const GfxDrawState &s, SDL_GPUSampleCount samples,
+                                      SDL_GPUTextureFormat format)
     {
         bool depthTest = s.depthTest;
-        bool coverage = AlphaToCoverage(s, samples);
+        bool coverage = AlphaToCoverage(cmd, s, samples);
         uint32_t key = (cmd.transformed ? 1u : 0u) | (uint32_t)(cmd.primitive & 7) << 1 |
                        (s.alphaBlend ? 1u : 0u) << 4 | (uint32_t)(s.srcBlend & 15) << 5 |
                        (uint32_t)(s.destBlend & 15) << 9 | (depthTest ? 1u : 0u) << 13 |
                        ((depthTest && s.depthWrite) ? 1u : 0u) << 14 | (uint32_t)(s.depthFunc & 15) << 15 |
-                       (uint32_t)(s.cull & 3) << 19 | (uint32_t)(samples & 3) << 21 | (coverage ? 1u : 0u) << 23;
+                       (uint32_t)(s.cull & 3) << 19 | (uint32_t)(samples & 3) << 21 | (coverage ? 1u : 0u) << 23 |
+                       (format == Remaster::sceneFormat ? 1u : 0u) << 24;
         auto it = pipelines.find(key);
         if (it != pipelines.end())
             return it->second;
@@ -284,7 +327,7 @@ struct ModernExecutor : GfxExecutor {
         }
 
         SDL_GPUColorTargetDescription color = {};
-        color.format = gpu.colorFormat;
+        color.format = format;
         color.blend_state.enable_blend = s.alphaBlend;
         color.blend_state.src_color_blendfactor = Gpu_BlendFactor(s.srcBlend);
         color.blend_state.dst_color_blendfactor = Gpu_BlendFactor(s.destBlend);
@@ -323,14 +366,16 @@ struct ModernExecutor : GfxExecutor {
         return p;
     }
 
-    SDL_GPUGraphicsPipeline *ClearPipeline(bool color, bool depth, SDL_GPUSampleCount samples)
+    SDL_GPUGraphicsPipeline *ClearPipeline(bool color, bool depth, SDL_GPUSampleCount samples,
+                                           SDL_GPUTextureFormat format)
     {
-        uint32_t key = 0x80000000u | (color ? 1u : 0u) | (depth ? 2u : 0u) | (uint32_t)(samples & 3) << 2;
+        uint32_t key = 0x80000000u | (color ? 1u : 0u) | (depth ? 2u : 0u) | (uint32_t)(samples & 3) << 2 |
+                       (format == Remaster::sceneFormat ? 1u : 0u) << 4;
         auto it = pipelines.find(key);
         if (it != pipelines.end())
             return it->second;
         SDL_GPUColorTargetDescription target = {};
-        target.format = gpu.colorFormat;
+        target.format = format;
         target.blend_state.enable_color_write_mask = true;
         target.blend_state.color_write_mask = color ? 0xf : 0;
         SDL_GPUGraphicsPipelineCreateInfo info = {};
@@ -382,7 +427,13 @@ struct ModernExecutor : GfxExecutor {
                a.fogStart == b.fogStart && a.fogEnd == b.fogEnd;
     }
 
-    static void FillLighting(const GfxDrawState &s, LightingUniforms &u)
+    // Whether a draw's lighting is done in the fragment shader.
+    bool PixelLit(const GfxCommand &c, const GfxDrawState &s) const
+    {
+        return PixelLighting() && !c.transformed && s.lighting;
+    }
+
+    static void FillLighting(const GfxDrawState &s, bool perPixel, LightingUniforms &u)
     {
         memset(&u, 0, sizeof(u));
         Gpu_Copy4(s.material.diffuse, u.materialDiffuse);
@@ -421,8 +472,9 @@ struct ModernExecutor : GfxExecutor {
         u.sources[3] = s.emissiveSource;
         u.fogFlags[0] = (s.fog && s.fogTableMode == GFX_FOG_NONE) ? s.fogVertexMode : 0;
         u.fogFlags[1] = s.normalizeNormals;
-        u.fogParams[0] = s.fogStart;
-        u.fogParams[1] = s.fogEnd;
+        u.fogFlags[2] = perPixel && s.lighting;
+        u.fogRange[0] = s.fogStart;
+        u.fogRange[1] = s.fogEnd;
     }
 
     static void FillTexGen(const GfxDrawState &s, TexGenUniforms &u)
@@ -435,7 +487,8 @@ struct ModernExecutor : GfxExecutor {
         u.texCoordIndex[3] = s.stages[1].textureTransform;
     }
 
-    static void FillCombiner(const GfxDrawState &s, SDL_GPUSampleCount samples, CombinerUniforms &u)
+    static void FillCombiner(const GfxCommand &c, const GfxDrawState &s, SDL_GPUSampleCount samples, bool pixelLit,
+                             RemasterSurface surface, CombinerUniforms &u)
     {
         memset(&u, 0, sizeof(u));
         const GfxStageState &a = s.stages[0], &b = s.stages[1];
@@ -456,7 +509,8 @@ struct ModernExecutor : GfxExecutor {
         Gpu_Color(s.textureFactor, u.textureFactor);
         u.alphaTest[0] = s.alphaTest;
         u.alphaTest[1] = s.alphaFunc;
-        u.alphaTest[2] = AlphaToCoverage(s, samples);
+        u.alphaTest[2] = AlphaToCoverage(c, s, samples);
+        u.alphaTest[3] = pixelLit;
         u.alphaRef[0] = (s.alphaRef & 0xff) / 255.0f;
         Gpu_Color(s.fogColor, u.fogColor);
         u.fogMode[0] = s.fog;
@@ -467,6 +521,7 @@ struct ModernExecutor : GfxExecutor {
         memcpy(u.bumpMatrix, a.bumpMat, sizeof(u.bumpMatrix));
         u.bumpLuminance[0] = a.bumpLumScale;
         u.bumpLuminance[1] = a.bumpLumOffset;
+        u.remaster[0] = surface;
     }
 
     // ---- frame execution ----
@@ -474,7 +529,7 @@ struct ModernExecutor : GfxExecutor {
     // Begins a pass on a render target texture or the back buffer: w, h are
     // its pixels, gameW, gameH the size the game draws it at.
     SDL_GPURenderPass *BeginPass(SDL_GPUCommandBuffer *cmd, GfxTexture *target, int &w, int &h, int &gameW,
-                                 int &gameH, SDL_GPUSampleCount &samples)
+                                 int &gameH, SDL_GPUSampleCount &samples, SDL_GPUTextureFormat &format)
     {
         SDL_GPUColorTargetInfo color = {};
         SDL_GPUDepthStencilTargetInfo depth = {};
@@ -484,14 +539,19 @@ struct ModernExecutor : GfxExecutor {
         depth.store_op = SDL_GPU_STOREOP_STORE;
         depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
         depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+        format = gpu.colorFormat;
         if (target == NULL) {
             color.texture = backMsaa != NULL ? backMsaa : backColor;
             depth.texture = backDepth;
+            samples = backSamples;
+            if (phase == IN_SCENE) {
+                color.texture = remaster.SceneTarget();
+                format = Remaster::sceneFormat;
+            }
             w = renderWidth;
             h = renderHeight;
             gameW = backWidth;
             gameH = backHeight;
-            samples = backSamples;
         } else {
             GfxTexture *root = target->cube != NULL ? target->cube : target;
             GpuTexture *g = gpu.Ensure(root);
@@ -536,6 +596,28 @@ struct ModernExecutor : GfxExecutor {
         GfxTexture *target = NULL;
         int targetW = renderWidth, targetH = renderHeight, gameW = backWidth, gameH = backHeight;
         SDL_GPUSampleCount samples = backSamples;
+        SDL_GPUTextureFormat format = gpu.colorFormat;
+
+        // The scene is the back buffer's drawing up to its last 3D draw; the
+        // pre-transformed draws after it (the HUD) are drawn over the effects.
+        RemasterScene scene;
+        if (remaster.settings.enabled)
+            remaster.FindScene(frame, scene);
+        // The remaster uniforms pushed to this command buffer, and the view
+        // they are for.
+        const GfxMatrix *remasterView = NULL;
+        auto finishScene = [&]() {
+            if (pass != NULL) {
+                SDL_EndGPURenderPass(pass);
+                pass = NULL;
+            }
+            remaster.Finish(cmd, backMsaa != NULL ? backMsaa : backColor, backSamples);
+            // The effects use the fragment uniform slot 0 too; the lighting
+            // is per vertex again.
+            combiner.valid = false;
+            lightingState = NULL;
+            phase = AFTER_SCENE;
+        };
         SDL_GPUGraphicsPipeline *boundPipeline = NULL;
         SDL_GPUBuffer *boundVertices = NULL;
         uint32_t boundVertexOffset = 0;
@@ -562,7 +644,8 @@ struct ModernExecutor : GfxExecutor {
             }
         };
 
-        for (const GfxCommand &c : frame.commands) {
+        for (size_t i = 0; i < frame.commands.size(); i++) {
+            const GfxCommand &c = frame.commands[i];
             if (c.type == GFX_CMD_TARGET) {
                 if (pass != NULL) {
                     SDL_EndGPURenderPass(pass);
@@ -571,8 +654,32 @@ struct ModernExecutor : GfxExecutor {
                 target = c.target;
                 continue;
             }
+            // A frame can come in several parts (Flush in gfx_core.cpp): the
+            // scene may start in one part and end in a later one.
+            if (target == NULL && remaster.settings.enabled) {
+                if (phase == BEFORE_SCENE && scene.last != SIZE_MAX && i <= scene.last) {
+                    if (pass != NULL) {
+                        SDL_EndGPURenderPass(pass);
+                        pass = NULL;
+                    }
+                    phase = IN_SCENE;
+                    remaster.BeginScene(cmd, frame, scene, present);
+                    // The shadow passes used the uniform slots 0; the
+                    // lighting is per pixel.
+                    transform.valid = false;
+                    combiner.valid = false;
+                    lightingState = NULL;
+                } else if (phase == IN_SCENE && present && (scene.last == SIZE_MAX || i > scene.last) &&
+                           c.type == GFX_CMD_DRAW && c.transformed) {
+                    finishScene();
+                }
+            }
+            // Shadow casters only (the shadow passes drew them).
+            if (c.type == GFX_CMD_DRAW && (frame.states[c.state].shadowFlags & GFX_SHADOW_ONLY) != 0)
+                continue;
             if (pass == NULL) {
-                pass = BeginPass(cmd, target, targetW, targetH, gameW, gameH, samples);
+                pass = BeginPass(cmd, target, targetW, targetH, gameW, gameH, samples, format);
+                remaster.BindSceneTextures(pass);
                 boundPipeline = NULL;
                 boundVertices = NULL;
                 indicesBound = false;
@@ -586,7 +693,7 @@ struct ModernExecutor : GfxExecutor {
                 bool depthClear = (c.clearFlags & GFX_CLEAR_ZBUFFER) != 0;
                 if (!colorClear && !depthClear)
                     continue;
-                SDL_GPUGraphicsPipeline *p = ClearPipeline(colorClear, depthClear, samples);
+                SDL_GPUGraphicsPipeline *p = ClearPipeline(colorClear, depthClear, samples, format);
                 SDL_BindGPUGraphicsPipeline(pass, p);
                 boundPipeline = p;
                 SDL_Rect scissor = scaledRect(c.clearViewport);
@@ -604,7 +711,7 @@ struct ModernExecutor : GfxExecutor {
                 continue;
             }
             const GfxDrawState &s = frame.states[c.state];
-            SDL_GPUGraphicsPipeline *pipeline = Pipeline(c, s, samples);
+            SDL_GPUGraphicsPipeline *pipeline = Pipeline(c, s, samples, format);
             if (pipeline == NULL)
                 continue;
             if (pipeline != boundPipeline) {
@@ -629,18 +736,27 @@ struct ModernExecutor : GfxExecutor {
                 SDL_PushGPUVertexUniformData(cmd, 0, &tu, sizeof(tu));
             if (!c.transformed) {
                 if (lightingState == NULL || !SameLighting(*lightingState, s)) {
-                    FillLighting(s, lightingValue);
+                    FillLighting(s, PixelLighting(), lightingValue);
                     lightingState = &s;
                 }
-                if (lighting.Changed(lightingValue))
+                if (lighting.Changed(lightingValue)) {
                     SDL_PushGPUVertexUniformData(cmd, 1, &lightingValue, sizeof(lightingValue));
+                    if (PixelLighting())
+                        SDL_PushGPUFragmentUniformData(cmd, 1, &lightingValue, sizeof(lightingValue));
+                }
                 TexGenUniforms tg;
                 FillTexGen(s, tg);
                 if (texGen.Changed(tg))
                     SDL_PushGPUVertexUniformData(cmd, 2, &tg, sizeof(tg));
             }
             CombinerUniforms cu;
-            FillCombiner(s, samples, cu);
+            // The remaster lights the scene, not what is drawn into textures.
+            RemasterSurface surface = target == NULL && phase == IN_SCENE ? remaster.Surface(c, s) : REMASTER_NONE;
+            if (surface != REMASTER_NONE && (remasterView == NULL || memcmp(remasterView, &s.view, sizeof(s.view)) != 0)) {
+                SDL_PushGPUFragmentUniformData(cmd, 2, &remaster.Uniforms(s.view), sizeof(RemasterUniforms));
+                remasterView = &s.view;
+            }
+            FillCombiner(c, s, samples, PixelLit(c, s), surface, cu);
             if (combiner.Changed(cu))
                 SDL_PushGPUFragmentUniformData(cmd, 0, &cu, sizeof(cu));
             if (boundTextures == NULL || memcmp(boundTextures->stages, s.stages, sizeof(s.stages)) != 0) {
@@ -673,6 +789,11 @@ struct ModernExecutor : GfxExecutor {
             SDL_SubmitGPUCommandBuffer(cmd);
             return;
         }
+        if (phase == IN_SCENE)
+            finishScene();
+        else if (phase == BEFORE_SCENE && remaster.settings.enabled)
+            remaster.FrameWithoutScene();
+        phase = BEFORE_SCENE;
 
         // The multisampled picture into backColor, which is shown and read.
         if (backMsaa != NULL) {

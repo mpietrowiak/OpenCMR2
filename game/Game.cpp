@@ -2220,6 +2220,9 @@ void Game_DrawDeferredObjects(void)
 {
     unsigned int i;
 
+    // PORT: these objects of the stage face the camera (their matrix is built
+    // from it): the renderer turns their sun shadows to face the sun instead.
+    Gfx_SetShadowMode(GFX_SHADOW_STATIC | GFX_SHADOW_BILLBOARD);
     if ((unsigned int)CGame::m_deferredDrawCount >= 1) {
         if (g_unk0x005207b4 != 0)
             qsort(CGame::m_deferredDrawObjects, CGame::m_deferredDrawCount, sizeof(CGame::m_deferredDrawObjects[0]), Game_CompareDeferredDrawDepth);
@@ -2235,6 +2238,7 @@ void Game_DrawDeferredObjects(void)
         }
         CGame::m_deferredDrawCount = 0;
     }
+    Gfx_SetShadowMode(0);
 }
 
 // qsort comparator of the transparent draw list (0x49cd20): type 0x14 goes
@@ -2281,6 +2285,8 @@ void Game_DrawStaticStageObjects(void)
     unsigned int i;
     FixVector delta;
 
+    // PORT: the stage, for the renderer's sun shadows.
+    Gfx_SetShadowMode(GFX_SHADOW_STATIC);
     for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++) {
         pObject = (StageObjectDraw *)g_sectors[g_visibleSectorIndices[i]]->pObjects;
         while (pObject != NULL) {
@@ -2320,6 +2326,7 @@ void Game_DrawStaticStageObjects(void)
             pObject = pObject->pNext;
         }
     }
+    Gfx_SetShadowMode(0);
 }
 
 // Identity world transform: the deferred draw paths set it before drawing
@@ -2432,6 +2439,8 @@ void Game_DrawCulledSectorMeshes(void)
     Pulse_Update(CMain::GetFrameDelta() - g_sectorFramePrevious);
     g_sectorFramePrevious = CMain::GetFrameDelta();
     Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_unk0x005207b8);
+    // PORT: the stage, for the renderer's sun shadows.
+    Gfx_SetShadowMode(GFX_SHADOW_STATIC);
     for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++) {
         pMesh = (Mesh *)g_sectors[g_visibleSectorIndices[i]]->pMesh;
         if (pMesh != NULL) {
@@ -2441,6 +2450,7 @@ void Game_DrawCulledSectorMeshes(void)
                 Graphics_DrawMeshLOD(pMesh, 1, 0, 0);
         }
     }
+    Gfx_SetShadowMode(0);
 }
 
 // Advances the pulse effect by the frame delta and draws the shadow mesh of
@@ -2462,7 +2472,9 @@ void Game_DrawCulledSectorShadows(void)
     Pulse_Update(CMain::GetFrameDelta() - g_shadowFramePrevious);
     g_shadowFramePrevious = CMain::GetFrameDelta();
     Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_unk0x005207b8);
-    if (g_sceneShadowMeshes != NULL) {
+    // PORT: with shadows cast from the sun (the remaster renderer), the
+    // stage's baked shadows are left out: the sun's fall there instead.
+    if (g_sceneShadowMeshes != NULL && !Gfx_CastsSunShadows()) {
         CGraphics::SetZWriteEnable(0);
         for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++) {
             pMesh = g_sceneShadowMeshes[g_visibleSectorIndices[i]];
@@ -2542,6 +2554,107 @@ GfxMatrix *FixMatrix_ToFloat(GfxMatrix *pOut, FixMatrix *pIn);
 // argument slot, and the inlined fixed point normalisation uses different
 // scratch slots), plus the 0.0f store which the original materialises as an
 // immediate.
+// PORT: the sun's shadows (the remaster renderer) need what casts them,
+// also where the game culls it: when the renderer draws its kept shadow maps
+// of the stage, the stage's sectors around the camera outside its view
+// (Sector_CullGridAroundViewNode keeps a 90 degree wedge ahead) are drawn
+// for them only, within this reach.
+static const float kShadowCasterReach = 120.0f;
+
+void Game_DrawShadowCasterSectors(void)
+{
+    FixVector pos;
+    StageObjectDraw *pObject;
+    Mesh *pMesh;
+    int centre, spread, row, col, rowStart, rowEnd, colStart, colEnd, index;
+    float reach, dx, dz;
+
+    if (!Gfx_ShadowCastersWanted() || g_sectorCount <= 0 || g_sectorSize <= 0)
+        return;
+    pos.x = g_unk0x0059be6c->world.position.x;
+    pos.y = 0;
+    pos.z = g_unk0x0059be6c->world.position.z;
+    centre = Sector_FromPosition(&pos);
+    spread = (int)(kShadowCasterReach * 65536.0f / g_sectorSize) + 1;
+    rowStart = centre / g_sectorsPerRow - spread;
+    rowEnd = centre / g_sectorsPerRow + spread + 1;
+    colStart = centre % g_sectorsPerRow - spread;
+    colEnd = centre % g_sectorsPerRow + spread + 1;
+    if (rowStart < 0)
+        rowStart = 0;
+    if (colStart < 0)
+        colStart = 0;
+    if (rowEnd > g_sectorRows)
+        rowEnd = g_sectorRows;
+    if (colEnd > g_sectorsPerRow)
+        colEnd = g_sectorsPerRow;
+    // Sectors touching the reach: their centre within it plus half a diagonal.
+    reach = kShadowCasterReach + (float)g_sectorSize / 65536.0f * 0.71f;
+
+    Gfx_SetShadowMode(GFX_SHADOW_ONLY | GFX_SHADOW_STATIC);
+    for (row = rowStart; row < rowEnd; row++) {
+        for (col = colStart; col < colEnd; col++) {
+            index = row * g_sectorsPerRow + col;
+            if (index < 0 || index >= g_sectorCount || g_sectors[index] == NULL ||
+                (g_sectorVisibleBits[index >> 5] & (1 << (index & 0x1f))) != 0)
+                continue;
+            dx = (float)(g_sectors[index]->x - pos.x) / 65536.0f;
+            dz = (float)(g_sectors[index]->z - pos.z) / 65536.0f;
+            if (dx * dx + dz * dz > reach * reach)
+                continue;
+            // The ground (hills cast shadows too), as Game_DrawCulledSectorMeshes.
+            Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_unk0x005207b8);
+            pMesh = (Mesh *)g_sectors[index]->pMesh;
+            if (pMesh != NULL) {
+                if ((pMesh->flags & 0x1000) != 0)
+                    Graphics_DrawMeshLOD(pMesh, 0, 1, 0);
+                else
+                    Graphics_DrawMeshLOD(pMesh, 1, 0, 0);
+            }
+            // The static objects, as Game_DrawStaticStageObjects and
+            // Game_DrawDeferredObjects draw them.
+            for (pObject = (StageObjectDraw *)g_sectors[index]->pObjects; pObject != NULL; pObject = pObject->pNext) {
+                if (pObject->field_0x14 == 0)
+                    continue;
+                if ((pObject->pMesh->flags & 2) == 0) {
+                    Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_unk0x005207b8);
+                    Graphics_DrawMeshLOD(pObject->pMesh, 1, 0, 0);
+                    continue;
+                }
+                *(GfxMatrix *)pObject->matrix = g_unk0x00597cc0;
+                if (pObject->scaleX != 0x10000 || pObject->scaleY != 0x10000 || pObject->scaleZ != 0x10000) {
+                    float scale;
+                    scale = (float)pObject->scaleX * CGraphics::m_oneOver65536;
+                    pObject->matrix[0] *= scale;
+                    pObject->matrix[1] *= scale;
+                    pObject->matrix[2] *= scale;
+                    scale = (float)pObject->scaleY * CGraphics::m_oneOver65536;
+                    pObject->matrix[4] *= scale;
+                    pObject->matrix[5] *= scale;
+                    pObject->matrix[6] *= scale;
+                    scale = (float)pObject->scaleZ * CGraphics::m_oneOver65536;
+                    pObject->matrix[8] *= scale;
+                    pObject->matrix[9] *= scale;
+                    pObject->matrix[10] *= scale;
+                }
+                pObject->matrix[12] = (float)pObject->offsetX * CGraphics::m_oneOver65536;
+                pObject->matrix[13] = (float)pObject->offsetY * CGraphics::m_oneOver65536;
+                pObject->matrix[14] = (float)pObject->offsetZ * CGraphics::m_oneOver65536;
+                Frontend_SetObjectField118(
+                    CGraphics::m_pTextureManager->textureBuffer[pObject->pMesh->pTriangles->textureIndex], 0);
+                Gfx_SetTransform(GFX_TRANSFORM_WORLD, (GfxMatrix *)pObject->matrix);
+                // Cut out by their alpha, as the near ones are drawn.
+                pObject->pMesh->flags |= 8;
+                Gfx_SetShadowMode(GFX_SHADOW_ONLY | GFX_SHADOW_STATIC | GFX_SHADOW_BILLBOARD);
+                Graphics_DrawMeshLOD(pObject->pMesh, 1, 0, 0);
+                Gfx_SetShadowMode(GFX_SHADOW_ONLY | GFX_SHADOW_STATIC);
+            }
+        }
+    }
+    Gfx_SetShadowMode(0);
+    Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_unk0x005207b8);
+}
+
 // FUNCTION: CMR2 0x0049d3f0
 int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, int bit, BYTE flag)
 {
@@ -2642,6 +2755,7 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
                 Game_DrawSortedNodes(bit);
                 Game_DrawDeferredObjects();
             }
+            Game_DrawShadowCasterSectors();
         } else {
             Game_DrawWorldMeshNodesAnd2DLayer();
         }

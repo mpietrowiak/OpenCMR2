@@ -2,6 +2,7 @@
 
 #include "platform/platform.h"
 #include "platform/testing.h"
+#include "port/gfx.h"
 #include "port/sys.h"
 
 #include <stdarg.h>
@@ -797,6 +798,14 @@ bool Translate(const SDL_Event &e, SysEvent *out)
             Input_HoldBackKey(e.key.scancode);
             out->type = SYS_EVENT_TOGGLE_FULLSCREEN;
             return !e.key.repeat;
+        }
+        // Ctrl+G switches the remaster on and off, to compare it with the
+        // original picture; G is hidden from the game until released.
+        if (e.key.scancode == SDL_SCANCODE_G && (e.key.mod & SDL_KMOD_CTRL) != 0) {
+            Input_HoldBackKey(e.key.scancode);
+            if (!e.key.repeat)
+                Gfx_ToggleRemaster();
+            return false;
         }
         out->type = SYS_EVENT_KEY_DOWN;
         out->key = Keys_FromScancode(e.key.scancode);

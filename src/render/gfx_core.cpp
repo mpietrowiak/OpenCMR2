@@ -126,6 +126,8 @@ void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD ver
     }
     if (vertexCount == 0 || s_executor == NULL)
         return;
+    if ((s_state.shadowFlags & GFX_SHADOW_ONLY) != 0 && !s_executor->CastsSunShadows())
+        return;
     std::vector<uint16_t> fan;
     if (primitive == GFX_TRIANGLEFAN) {
         DWORD n = indices ? indexCount : vertexCount;
@@ -596,13 +598,29 @@ extern "C" GfxVertexBuffer *Gfx_CreateVertexBuffer(DWORD vertexCount)
     return buffer;
 }
 
+// The draws recorded this frame from a buffer take its vertices as they are
+// now into the frame's own: the buffer can change or go, and the frame stays
+// whole (running the frame in parts would split the scene the renderer
+// lights and shadows as one).
+static void DetachVertexBuffer(GfxVertexBuffer *buffer)
+{
+    for (GfxCommand &cmd : s_frame.commands) {
+        if (cmd.type != GFX_CMD_DRAW || cmd.buffer != buffer)
+            continue;
+        cmd.buffer = NULL;
+        cmd.firstVertexByte = AppendVertices((const uint8_t *)buffer->vertices.data() + cmd.firstVertexByte,
+                                             cmd.vertexCount * sizeof(GfxVertex));
+    }
+    s_frame.buffers.erase(std::remove(s_frame.buffers.begin(), s_frame.buffers.end(), buffer), s_frame.buffers.end());
+    buffer->referencedRecord = 0;
+}
+
 extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
 {
     if (buffer == NULL)
         return;
-    // Draws recorded this frame may still use it.
     if (buffer->referencedRecord == s_record)
-        Flush();
+        DetachVertexBuffer(buffer);
     if (s_executor != NULL)
         s_executor->DestroyVertexBuffer(buffer);
     delete buffer;
@@ -612,10 +630,9 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
 {
     if (buffer == NULL)
         return NULL;
-    // Draws recorded this frame refer to the contents before this lock: run
-    // them first. It is rare: buffers drawn by reference are rarely locked.
+    // Draws recorded this frame refer to the contents before this lock.
     if (buffer->referencedRecord == s_record)
-        Flush();
+        DetachVertexBuffer(buffer);
     buffer->version++;
     buffer->lastLockFrame = s_presentedFrames;
     return buffer->vertices.data();
@@ -900,6 +917,47 @@ extern "C" void Gfx_GenerateMipmaps(GfxTexture *texture)
         }
     }
     texture->dirty = true;
+}
+
+extern "C" BOOL Gfx_CastsSunShadows(void)
+{
+    return s_executor != NULL && s_executor->CastsSunShadows();
+}
+
+extern "C" BOOL Gfx_ShadowCastersWanted(void)
+{
+    return s_executor != NULL && s_executor->ShadowCastersWanted();
+}
+
+extern "C" void Gfx_ToggleRemaster(void)
+{
+    if (s_executor != NULL)
+        s_executor->ToggleRemaster();
+}
+
+extern "C" void Gfx_SetShadowMode(DWORD flags)
+{
+    if (s_state.shadowFlags == flags)
+        return;
+    s_state.shadowFlags = flags;
+    Touch();
+}
+
+static bool s_bakedRampSet;
+static DWORD s_bakedShade, s_bakedLight;
+
+extern "C" void Gfx_SetBakedLightRamp(DWORD shade, DWORD light)
+{
+    s_bakedRampSet = true;
+    s_bakedShade = shade;
+    s_bakedLight = light;
+}
+
+bool Gfx_BakedLightRamp(DWORD &shade, DWORD &light)
+{
+    shade = s_bakedShade;
+    light = s_bakedLight;
+    return s_bakedRampSet;
 }
 
 extern "C" BOOL Gfx_ReadBackBuffer(int x, int y, int width, int height, DWORD *pixels)

@@ -98,6 +98,9 @@ GpuContext::~GpuContext()
     if (device == NULL)
         return;
     SDL_WaitForGPUIdle(device);
+    if (pendingReadback.fence != NULL)
+        SDL_ReleaseGPUFence(device, pendingReadback.fence);
+    SDL_ReleaseGPUTransferBuffer(device, pendingReadback.buffer);
     for (auto &s : samplers)
         SDL_ReleaseGPUSampler(device, s.second);
     SDL_ReleaseGPUTexture(device, white2D);
@@ -602,45 +605,88 @@ void GpuContext::BindTextures(SDL_GPURenderPass *pass, const GfxDrawState &s)
 
 // ---- presentation --------------------------------------------------------------------
 
+void GpuContext::CollectReadback(GfxReadback &readback, bool wait)
+{
+    PendingReadback &p = pendingReadback;
+    if (p.fence == NULL)
+        return;
+    if (wait)
+        SDL_WaitForGPUFences(device, true, &p.fence, 1);
+    else if (!SDL_QueryGPUFence(device, p.fence))
+        return;
+    const uint32_t *map = (const uint32_t *)SDL_MapGPUTransferBuffer(device, p.buffer, false);
+    if (map != NULL) {
+        readback.pixels.resize((size_t)p.w * p.h);
+        for (int y = 0; y < p.h; y++) {
+            int py = std::min(p.readH - 1, (2 * y + 1) * p.readH / (2 * p.h));
+            for (int x = 0; x < p.w; x++) {
+                int px = std::min(p.readW - 1, (2 * x + 1) * p.readW / (2 * p.w));
+                readback.pixels[(size_t)y * p.w + x] = map[(size_t)py * p.readW + px];
+            }
+        }
+        SDL_UnmapGPUTransferBuffer(device, p.buffer);
+        readback.readyWidth = p.w;
+        readback.readyHeight = p.h;
+        readback.ready = true;
+    }
+    SDL_ReleaseGPUFence(device, p.fence);
+    SDL_ReleaseGPUTransferBuffer(device, p.buffer);
+    p = PendingReadback();
+}
+
 void GpuContext::Present(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *picture, int renderW, int renderH, int gameW,
                          int gameH, GfxReadback &readback, bool vsync, bool stretch)
 {
     // Read back before the frame is shown (the lens flare test). The request
     // is in the game's pixels; each is taken from the middle of the picture
-    // pixels it covers.
-    SDL_GPUTransferBuffer *readbackBuffer = NULL;
-    int readW = 0, readH = 0;
-    if (readback.requested && readback.width > 0 && readback.height > 0) {
+    // pixels it covers. One read is in flight at a time.
+    CollectReadback(readback, false);
+    bool reading = false;
+    if (readback.requested && readback.width > 0 && readback.height > 0 && pendingReadback.fence == NULL) {
         int x = std::max(0, std::min(readback.x, gameW - 1));
         int y = std::max(0, std::min(readback.y, gameH - 1));
         int w = std::min(readback.width, gameW - x), h = std::min(readback.height, gameH - y);
         int readX = x * renderW / gameW, readY = y * renderH / gameH;
-        readW = std::max(1, std::min(renderW - readX, (x + w) * renderW / gameW - readX));
-        readH = std::max(1, std::min(renderH - readY, (y + h) * renderH / gameH - readY));
+        int readW = std::max(1, std::min(renderW - readX, (x + w) * renderW / gameW - readX));
+        int readH = std::max(1, std::min(renderH - readY, (y + h) * renderH / gameH - readY));
         SDL_GPUTransferBufferCreateInfo tbi = { SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, (Uint32)(readW * readH * 4), 0 };
-        readbackBuffer = SDL_CreateGPUTransferBuffer(device, &tbi);
-        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
-        SDL_GPUTextureRegion src = {};
-        src.texture = picture;
-        src.x = readX;
-        src.y = readY;
-        src.w = readW;
-        src.h = readH;
-        src.d = 1;
-        SDL_GPUTextureTransferInfo dst = { readbackBuffer, 0, 0, 0 };
-        SDL_DownloadFromGPUTexture(copy, &src, &dst);
-        SDL_EndGPUCopyPass(copy);
-        readback.readyWidth = w;
-        readback.readyHeight = h;
+        SDL_GPUTransferBuffer *buffer = SDL_CreateGPUTransferBuffer(device, &tbi);
+        if (buffer != NULL) {
+            SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
+            SDL_GPUTextureRegion src = {};
+            src.texture = picture;
+            src.x = readX;
+            src.y = readY;
+            src.w = readW;
+            src.h = readH;
+            src.d = 1;
+            SDL_GPUTextureTransferInfo dst = { buffer, 0, 0, 0 };
+            SDL_DownloadFromGPUTexture(copy, &src, &dst);
+            SDL_EndGPUCopyPass(copy);
+            pendingReadback.buffer = buffer;
+            pendingReadback.readW = readW;
+            pendingReadback.readH = readH;
+            pendingReadback.w = w;
+            pendingReadback.h = h;
+            reading = true;
+        }
+        readback.requested = false;
     }
 
     // OPENCMR2_CAPTURE=dir: the picture shown every OPENCMR2_CAPTURE_EVERY
-    // frames (60) as dir/frame-N.bmp, to compare renderers and builds.
+    // frames (60) as dir/frame-N.bmp, to compare renderers and builds; from
+    // frame OPENCMR2_CAPTURE_FROM (0) on, OPENCMR2_CAPTURE_COUNT pictures
+    // (all) at most.
     static const char *captureDir = getenv("OPENCMR2_CAPTURE");
     static int captureEvery = getenv("OPENCMR2_CAPTURE_EVERY") ? atoi(getenv("OPENCMR2_CAPTURE_EVERY")) : 60;
+    static unsigned captureFrom = getenv("OPENCMR2_CAPTURE_FROM") ? (unsigned)atoi(getenv("OPENCMR2_CAPTURE_FROM")) : 0;
+    static int captureCount = getenv("OPENCMR2_CAPTURE_COUNT") ? atoi(getenv("OPENCMR2_CAPTURE_COUNT")) : -1;
     static unsigned presented = 0;
     SDL_GPUTransferBuffer *captureBuffer = NULL;
-    if (captureDir != NULL && captureEvery > 0 && presented % captureEvery == 0) {
+    if (captureDir != NULL && captureEvery > 0 && presented >= captureFrom &&
+        (presented - captureFrom) % captureEvery == 0 && captureCount != 0) {
+        if (captureCount > 0)
+            captureCount--;
         SDL_GPUTransferBufferCreateInfo tbi = { SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, (Uint32)(renderW * renderH * 4), 0 };
         captureBuffer = SDL_CreateGPUTransferBuffer(device, &tbi);
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
@@ -684,12 +730,13 @@ void GpuContext::Present(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *picture, int
         SDL_BlitGPUTexture(cmd, &blit);
     }
 
-    if (readbackBuffer != NULL || captureBuffer != NULL) {
+    if (captureBuffer != NULL) {
         SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
         SDL_WaitForGPUFences(device, true, &fence, 1);
-        SDL_ReleaseGPUFence(device, fence);
-    }
-    if (captureBuffer != NULL) {
+        if (reading)
+            pendingReadback.fence = fence;
+        else
+            SDL_ReleaseGPUFence(device, fence);
         void *pixels = SDL_MapGPUTransferBuffer(device, captureBuffer, false);
         SDL_Surface *surface = SDL_CreateSurfaceFrom(renderW, renderH, SDL_PIXELFORMAT_BGRX32, pixels, renderW * 4);
         char path[1024];
@@ -699,23 +746,14 @@ void GpuContext::Present(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *picture, int
         SDL_DestroySurface(surface);
         SDL_UnmapGPUTransferBuffer(device, captureBuffer);
         SDL_ReleaseGPUTransferBuffer(device, captureBuffer);
-    }
-    if (readbackBuffer != NULL) {
-        const uint32_t *map = (const uint32_t *)SDL_MapGPUTransferBuffer(device, readbackBuffer, false);
-        int w = readback.readyWidth, h = readback.readyHeight;
-        readback.pixels.resize((size_t)w * h);
-        for (int y = 0; y < h; y++) {
-            int py = std::min(readH - 1, (2 * y + 1) * readH / (2 * h));
-            for (int x = 0; x < w; x++) {
-                int px = std::min(readW - 1, (2 * x + 1) * readW / (2 * w));
-                readback.pixels[(size_t)y * w + x] = map[(size_t)py * readW + px];
-            }
-        }
-        SDL_UnmapGPUTransferBuffer(device, readbackBuffer);
-        SDL_ReleaseGPUTransferBuffer(device, readbackBuffer);
-        readback.ready = true;
-        readback.requested = false;
-    } else if (captureBuffer == NULL) {
+    } else if (reading) {
+        pendingReadback.fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    } else {
         SDL_SubmitGPUCommandBuffer(cmd);
+    }
+    // Without a fence the read cannot be waited for: drop it.
+    if (reading && pendingReadback.fence == NULL) {
+        SDL_ReleaseGPUTransferBuffer(device, pendingReadback.buffer);
+        pendingReadback = PendingReadback();
     }
 }
