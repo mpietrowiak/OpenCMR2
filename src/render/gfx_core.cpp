@@ -188,8 +188,8 @@ void LandscapeDesktopSize(int *width, int *height)
 }
 
 // Resolutions at the display's aspect ratio, from 540 lines up to the display
-// itself, and the original 4:3 ones up to 1024x768. At most 10 (the game's
-// list), smallest first.
+// itself, the default one (Gfx_GetDefaultDisplayMode) and the original 4:3
+// ones up to 1024x768. At most 10 (the game's list), smallest first.
 void BuildModes()
 {
     static const int classic[][2] = { { 640, 480 }, { 800, 600 }, { 1024, 768 } };
@@ -207,6 +207,9 @@ void BuildModes()
         add(c[0], c[1]);
     for (int h : heights)
         add((int)((long long)h * desktopW / desktopH) & ~1, h);
+    int defaultW, defaultH;
+    Gfx_GetDefaultDisplayMode(&defaultW, &defaultH);
+    add(defaultW, defaultH);
     add(desktopW, desktopH);
     std::sort(s_modes.begin(), s_modes.end());
     while (s_modes.size() > 10)
@@ -214,6 +217,8 @@ void BuildModes()
 }
 
 } // namespace
+
+extern "C" void Gfx_GetDefaultDisplayMode(int *width, int *height);
 
 // ---- formats -------------------------------------------------------------------------
 
@@ -328,23 +333,25 @@ extern "C" int Gfx_GetDisplayModeCount(void)
 
 extern "C" void Gfx_GetDefaultDisplayMode(int *width, int *height)
 {
-    // The display's aspect ratio, at a height where the game's 2D (menus,
-    // text, HUD), drawn in pixels for 640x480, stays readable: 720 lines, as
-    // the game was played at 1024x768, and 540 on Android's small screens.
-    // Higher modes stay available for a sharper 3D picture.
+    // The display's aspect ratio. The game draws its menus, text and HUD in
+    // pixels, so the height is the display's own, for them to stay sharp,
+    // divided by the smallest whole number that keeps it within a limit, so
+    // they are not tiny on dense screens and are enlarged evenly: up to 1600
+    // lines (2160 becomes 1080), and 720 on Android's small screens (1080
+    // becomes 540). The modern renderer draws the 3D scene at the display's
+    // resolution whatever the mode.
 #ifdef __ANDROID__
-    const int lines = 540;
+    const int maxLines = 720;
 #else
-    const int lines = 720;
+    const int maxLines = 1600;
 #endif
     int desktopW, desktopH;
     LandscapeDesktopSize(&desktopW, &desktopH);
-    *width = desktopW;
-    *height = desktopH;
-    if (desktopH > lines) {
-        *width = (int)((long long)lines * desktopW / desktopH) & ~1;
-        *height = lines;
-    }
+    int divisor = (desktopH + maxLines - 1) / maxLines;
+    if (divisor < 1)
+        divisor = 1;
+    *height = desktopH / divisor;
+    *width = (desktopW / divisor) & ~1;
 }
 
 extern "C" void Gfx_GetDisplayMode(int index, int *width, int *height)

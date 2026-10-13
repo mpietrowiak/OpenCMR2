@@ -89,11 +89,14 @@ the frame already drew from runs the recorded draws first.
 
 The display modes offered to the game are the original 4:3 ones up to
 1024x768 and the display's own aspect ratio from 540 lines up to the desktop
-resolution. A new configuration starts at the display's aspect ratio at 720
-lines (540 on Android): the game draws its menus, text and HUD in pixels for
-640x480, so this keeps them readable. With the modern renderer the 3D scene
-is at the display's resolution whatever the mode; with the classic one,
-higher modes give a sharper 3D picture and smaller menus. As in SilentPatch, the projection keeps the
+resolution. The game draws its menus, text and HUD in pixels, made for
+640x480: they are sharp at any mode, and smaller the higher the mode. A new
+configuration starts at the display's resolution, divided by the smallest
+whole number that brings it to 1600 lines or fewer (720 on Android's small
+screens), so the 2D is enlarged evenly on dense displays (2160 lines become
+1080, a 1080-line phone gets 540). With the modern renderer the 3D scene is at
+the display's resolution whatever the mode; with the classic one, the mode is
+also the 3D resolution. As in SilentPatch, the projection keeps the
 vertical view at any aspect ratio instead of stretching it, and the field of
 view is configurable (`View_SetPlayerProjection`). Further rendering
 improvements will be added one at a time, each behind an option, with the
