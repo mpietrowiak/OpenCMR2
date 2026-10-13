@@ -11,7 +11,7 @@ SDL3 and the SDL GPU API (Vulkan, Metal) and needs the original game data.
 | `game/` | The decompiled game, synced from CMR2Decomp (`tools/sync_upstream.py`, last commit in `UPSTREAM`). |
 | `src/port/` | The platform API the game calls: `types.h`, `sys.h`, `gfx.h`, `audio.h`, `input.h`, `movie.h`, `net.h`. Portable functions, compatibility types and disk-to-native layout conversion. |
 | `src/platform/` | `main()`, window and event loop, time, files, configuration (SDL3). |
-| `src/render/` | The SDL_GPU renderer behind `gfx.h`, and its shaders. |
+| `src/render/` | The renderers behind `gfx.h` on SDL_GPU (classic and modern), and their shaders. |
 | `src/audio/` | Mixer behind `audio.h` (SDL3 audio streams), WAV and MS-ADPCM decoding. |
 | `src/input/` | Keyboard, mouse, joysticks, gamepads and force feedback (SDL3). |
 | `src/video/` | Standalone Bink 1 (`BIKi`) video/audio decoder behind `movie.h`; queued sound uses the SDL3 mixer. No external codec library. See [VIDEO.md](VIDEO.md). |
@@ -68,12 +68,32 @@ block, and draws with an "uber" shader that reproduces the fixed-function
 equations. Device enumeration, display-mode switching, lost surfaces and
 COM disappear: the game asks for what it needs and the backend provides it.
 
+Two renderers run the recorded frames, chosen by `[video] renderer`. Both
+share `gpu_context.cpp`: the device, textures, samplers and the vertex buffers
+kept on the GPU.
+
+- `gfx_classic.cpp` draws at the game's resolution, as the original did.
+- `gfx_modern.cpp` (the default) draws at the resolution the picture is shown
+  at, multisampled, with anisotropic filtering and alpha to coverage on
+  alpha-tested foliage and fences. 3D draws get their viewports scaled to it;
+  pre-transformed draws (menus, text, HUD) keep the game's coordinates, so the
+  game's resolution only sets their size. Its shader data is split by how
+  often it changes and pushed only when it does, and bindings are skipped
+  when unchanged. Its shaders compute what the classic ones do: without
+  multisampling and at the game's resolution, both give the same pixels.
+
+Stage geometry stays on the GPU: `gfx_core.cpp` records draws from a vertex
+buffer that has not been locked for a few frames by reference, and copies
+the vertices of buffers the game rewrites (cars, sprites). A lock of a buffer
+the frame already drew from runs the recorded draws first.
+
 The display modes offered to the game are the original 4:3 ones up to
 1024x768 and the display's own aspect ratio from 540 lines up to the desktop
 resolution. A new configuration starts at the display's aspect ratio at 720
 lines (540 on Android): the game draws its menus, text and HUD in pixels for
-640x480, so they shrink as the resolution grows, and higher modes are there
-for a sharper 3D picture. As in SilentPatch, the projection keeps the
+640x480, so this keeps them readable. With the modern renderer the 3D scene
+is at the display's resolution whatever the mode; with the classic one,
+higher modes give a sharper 3D picture and smaller menus. As in SilentPatch, the projection keeps the
 vertical view at any aspect ratio instead of stretching it, and the field of
 view is configurable (`View_SetPlayerProjection`). Further rendering
 improvements will be added one at a time, each behind an option, with the

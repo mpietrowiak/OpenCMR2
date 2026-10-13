@@ -134,6 +134,25 @@ cadence, not actual monitor scanout. Blocking movies can occupy a single
 callback with many internal presentations. Startup, menus and races should be
 examined separately.
 
+## Compare renderers
+
+`stage_probe` renders with the GPU when it runs without `OPENCMR2_HEADLESS`
+and with a display. `OPENCMR2_CAPTURE=dir` saves the picture shown every
+`OPENCMR2_CAPTURE_EVERY` frames (60) as `dir/frame-N.bmp`. The settings come
+from `opencmr2.ini` in the probe's user directory (`XDG_DATA_HOME`), for
+example `renderer`, `msaa`, `vsync = 0` for timings, and `fullscreen = 0`:
+
+```sh
+mkdir -p /tmp/modern /tmp/modern-capture
+printf '[video]\nfullscreen = 0\nrenderer = modern\n' > /tmp/modern/opencmr2.ini
+XDG_DATA_HOME=/tmp/modern OPENCMR2_CAPTURE=/tmp/modern-capture \
+    build/linux/tests/stage_probe ~/cmr2game /tmp/modern.jsonl 60 400
+```
+
+The modern renderer with `msaa = 1` and `anisotropy = 1` at the game's
+resolution gives the same pixels as the classic one. The gravel thrown up by
+the car differs between any two runs, also of one renderer.
+
 GPU execution time, actual display intervals and input-to-display latency are
 not measured yet. Headless probe timings include trace overhead and no GPU;
 use a normal session on the target machine to investigate real stutter. The

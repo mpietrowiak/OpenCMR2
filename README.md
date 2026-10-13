@@ -139,6 +139,10 @@ It is created with comments on first launch.
 | `[video] fullscreen` | `1` | Fullscreen (`1`) or window (`0`), changed and saved by Alt+Enter |
 | `[video] fov` | `70` | Field of view in degrees, 30 to 150 (70 is the original) |
 | `[video] run_in_background` | `0` | Keep running when the window loses focus |
+| `[video] renderer` | `modern` | `modern`: the 3D scene at the display's resolution, with the game's resolution setting sizing menus and HUD. `classic`: the original's picture at the game's resolution |
+| `[video] msaa` | `4` | Multisampling of the modern renderer: 1 (off), 2, 4 or 8 |
+| `[video] anisotropy` | `8` | Anisotropic texture filtering of the modern renderer, 1 (off) to 16 |
+| `[video] render_scale` | `100` | Resolution of the modern renderer's 3D scene, in percent of the display's (25 to 400) |
 | `[install] language` | `English` | English, American, French, German, Italian, Spanish or Polish |
 | `[install] sku` | `EUROPE` | Game edition: `EUROPE`, `AMERICA`, `POLAND` or `JAPAN` |
 | `[install] menu_shortcut` | asked | Entry in the applications menu (Linux) or Start menu (Windows): `1` keeps it pointing at this copy, `0` removes it |

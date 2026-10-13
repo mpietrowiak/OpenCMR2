@@ -105,7 +105,8 @@ if(OPENCMR2_SHADERS_MSL)
 endif()
 
 set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/render/shaders)
-set(SHADER_SOURCES fixed3d.vert fixedtl.vert fixed.frag clear.vert clear.frag)
+set(SHADER_SOURCES fixed3d.vert fixedtl.vert fixed.frag clear.vert clear.frag
+    modern3d.vert moderntl.vert modern.frag)
 set(SHADER_FILES)
 foreach(shader IN LISTS SHADER_SOURCES)
     set(output ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.spv)
@@ -113,7 +114,7 @@ foreach(shader IN LISTS SHADER_SOURCES)
         OUTPUT ${output}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
         COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -o ${output} ${SHADER_DIR}/${shader}
-        DEPENDS ${SHADER_DIR}/${shader} ${SHADER_DIR}/common.glsl
+        DEPENDS ${SHADER_DIR}/${shader} ${SHADER_DIR}/common.glsl ${SHADER_DIR}/modern_common.glsl
         COMMENT "Compiling shader ${shader}")
     list(APPEND SHADER_FILES ${output})
     if(OPENCMR2_SHADERS_MSL)
@@ -184,7 +185,9 @@ target_link_libraries(opencmr2_net PUBLIC enet Threads::Threads)
 # ---- platform subsystems ---------------------------------------------------------
 target_sources(opencmr2_platform PRIVATE
     render/gfx_core.cpp
-    render/gfx_gpu.cpp
+    render/gpu_context.cpp
+    render/gfx_classic.cpp
+    render/gfx_modern.cpp
     ${SHADER_HEADER}
     ${ICON_HEADER}
     audio/audio_sdl.cpp

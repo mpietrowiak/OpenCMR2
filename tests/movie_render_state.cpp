@@ -22,6 +22,7 @@ extern "C" DWORD Sys_GetTicks() { return 0; }
 extern "C" void Sys_GetDesktopSize(int *w, int *h) { *w = 640; *h = 480; }
 extern "C" void Sys_Log(const char *, ...) {}
 int Platform_GetSettingInt(const char *, int value) { return value; }
+const char *Platform_GetSetting(const char *, const char *value) { return value; }
 extern "C" AudioStream *Audio_CreateStream(DWORD, int) { return nullptr; }
 extern "C" BOOL Audio_QueueStream(AudioStream *, const float *, DWORD) { return FALSE; }
 extern "C" void Audio_StartStream(AudioStream *) {}
@@ -37,9 +38,11 @@ struct CaptureExecutor : GfxExecutor {
                 drawnState = frame.states[command.state];
     }
     void DestroyTexture(GfxTexture *) override {}
+    void DestroyVertexBuffer(GfxVertexBuffer *) override {}
     void ReadTexture(GfxTexture *) override {}
 };
-GfxExecutor *Gfx_CreateGpuExecutor() { return new CaptureExecutor; }
+GfxExecutor *Gfx_CreateClassicExecutor() { return new CaptureExecutor; }
+GfxExecutor *Gfx_CreateModernExecutor() { return new CaptureExecutor; }
 
 int main()
 {
