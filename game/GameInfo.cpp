@@ -6002,6 +6002,15 @@ void Scene_SetAmbient(BYTE *pColour, int boost);
 SceneNode *Scene_CreateLight(int type, int r, int g, int b, FixVector *pPosition, FixAngles *pAngles, SceneNode *pParent);
 int Game_PrepareScene(SceneNode *pRoot, SceneNode *pCamera, void *pRect, int param);
 
+// PORT: the original service-area projection includes the 4:3 aspect ratio in
+// its horizontal scale. Keep that framing at 4:3 and widen the view at wider
+// resolutions, as View_SetPlayerProjection does for the in-race camera.
+static int OptionMenu_GetBackgroundFovX(void)
+{
+    return (int)((long long)0x30978 * 4 * g_pGraphics->resY /
+                 (3 * g_pGraphics->resX));
+}
+
 // Builds the option menu's background world: root node, camera, ambient and key
 // light, then registers the release callback.
 // FUNCTION: CMR2 0x005013a0
@@ -6041,7 +6050,7 @@ void OptionMenu_CreateBackgroundWorld(void)
         pNode->dirty = 1;
     Scene_SetAmbient(colour, 0);
     Scene_CreateLight(2, 0x10000, 0x10000, 0x10000, &lightPosition, &angles, g_unk0x0082b1b4);
-    CGraphics::SetProjection(0x30978, 0x4326e, 0xfa0000, 0x10000);
+    CGraphics::SetProjection(OptionMenu_GetBackgroundFovX(), 0x4326e, 0xfa0000, 0x10000);
     Game_PrepareScene(g_unk0x0082b1b4, g_unk0x0082b1b0, view, 0);
     CGame::RegisterCallback(OptionMenu_UpdateBackgroundRoot, NULL);
 }
@@ -6596,7 +6605,7 @@ void OptionMenu_DrawBackgroundState(CallbackStateMachine *p1, BYTE state)
     rect[3] = (short)((int)g_pGraphics->resY * 2 / 3);
     CGraphics::ClearTarget();
     CGraphics::ClearZBuffer();
-    CGraphics::SetProjection(0x30978, 0x4326e, 0xfa0000, 0x10000);
+    CGraphics::SetProjection(OptionMenu_GetBackgroundFovX(), 0x4326e, 0xfa0000, 0x10000);
     OptionMenu_DrawActivePage();
     Game_PrepareScene(g_unk0x0082b1b4, g_unk0x0082b1b0, &rect[0], 0);
     Game_DrawSceneViewport(g_unk0x0082b1b4, g_unk0x0082b1b0, &rect[0], 0, 1);
@@ -6625,7 +6634,7 @@ void OptionMenu_FadeBackgroundToGrey(int param1, int unused)
     CGraphics::SetClearColour(1, colour[0], colour[1], colour[2]);
     CGraphics::ClearTarget();
     CGraphics::ClearZBuffer();
-    CGraphics::SetProjection(0x30978, 0x4326e, 0xfa0000, 0x10000);
+    CGraphics::SetProjection(OptionMenu_GetBackgroundFovX(), 0x4326e, 0xfa0000, 0x10000);
     // The globals are the root and camera scene nodes; the third argument is a
     // temporary 4-short rectangle covering the middle of the screen.
     Game_PrepareScene(g_unk0x0082b1b4, g_unk0x0082b1b0, rect, 0);
@@ -6653,7 +6662,7 @@ void OptionMenu_FadeToStoredColour(int param1, int unused)
     CGraphics::SetClearColour(1, colour[0], colour[1], colour[2]);
     CGraphics::ClearTarget();
     CGraphics::ClearZBuffer();
-    CGraphics::SetProjection(0x30978, 0x4326e, 0xfa0000, 0x10000);
+    CGraphics::SetProjection(OptionMenu_GetBackgroundFovX(), 0x4326e, 0xfa0000, 0x10000);
     CMain::GetFrameDelta();
     Game_PrepareScene(g_unk0x0082b1b4, g_unk0x0082b1b0, rect, 0);
     Game_DrawSceneViewport(g_unk0x0082b1b4, g_unk0x0082b1b0, rect, 0, 1);
