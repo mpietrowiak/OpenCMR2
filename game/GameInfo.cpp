@@ -6011,6 +6011,15 @@ void Scene_SetAmbient(BYTE *pColour, int boost);
 SceneNode *Scene_CreateLight(int type, int r, int g, int b, FixVector *pPosition, FixAngles *pAngles, SceneNode *pParent);
 int Game_PrepareScene(SceneNode *pRoot, SceneNode *pCamera, void *pRect, int param);
 
+// PORT: the original service-area projection includes the 4:3 aspect ratio in
+// its horizontal scale. Keep that framing at 4:3 and widen the view at wider
+// resolutions, as View_SetPlayerProjection does for the in-race camera.
+static int OptionMenu_GetBackgroundFovX(void)
+{
+    return (int)((long long)0x30978 * 4 * g_pGraphics->resY /
+                 (3 * g_pGraphics->resX));
+}
+
 // Builds the option menu's background world: root node, camera, ambient and key
 // light, then registers the release callback.
 // FUNCTION: CMR2 0x005013a0
