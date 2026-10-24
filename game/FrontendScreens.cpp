@@ -7949,6 +7949,7 @@ unsigned int FrontendProfile_ApplyDriverProfileBlock(const SavedGameImage *pBloc
     if (image.options.difficulty >= 2 && progress.hardRallies < reached)
         progress.hardRallies = reached;
     RallyData_SetSetupFlag11(0);
+    SavedGames_QueueServiceState(pBlock);
     return 1;
 }
 

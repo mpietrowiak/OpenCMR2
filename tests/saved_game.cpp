@@ -45,6 +45,18 @@ extern void RallyData_SetStageSelectionAndRefreshFlags(BYTE);
 extern void RallyData_SetSelectionStateByte(char);
 extern BYTE RallyData_GetSelectionStateByte();
 extern void RallyTiming_SetStageTimeSeconds(int, int);
+extern void OptionMenu_LoadRallyRecords(void);
+extern void OptionMenu_InitDefaultRecordTables(void);
+extern void OptionMenu_InitializeServiceTimes(void);
+struct PlayerOptionCacheFixture {
+    BYTE dirty[4][12];
+    SavedGameCarRecord records[4];
+};
+extern PlayerOptionCacheFixture g_playerOptionCache;
+extern BYTE g_unk0x0082bee8[8][7];
+extern BYTE g_unk0x0082bf20[16][7];
+extern int g_unk0x0082af78[4];
+extern int g_unk0x0082af90[4];
 
 namespace fs = std::filesystem;
 static void Check(bool ok, const char *message)
@@ -115,26 +127,68 @@ int main()
         RallyData_SetCountrySelectionBits(5);
         RallyData_SetStageSelectionAndRefreshFlags(3);
         RallyData_SetSelectionStateByte(2);
+        memset(&g_playerOptionCache, 0, sizeof(g_playerOptionCache));
+        memset(g_unk0x0082bee8, 0, sizeof(g_unk0x0082bee8));
+        memset(g_unk0x0082bf20, 0, sizeof(g_unk0x0082bf20));
+        for (int i = 0; i < players; i++) {
+            for (int j = 0; j < 12; j++)
+                g_playerOptionCache.dirty[i][j] = BYTE((i + j) & 1);
+            memset(&g_playerOptionCache.records[i], 0x70 + i, sizeof(SavedGameCarRecord));
+            for (int j = 0; j < 7; j++) {
+                g_unk0x0082bee8[i][j] = BYTE(10 + i * 7 + j);
+                g_unk0x0082bf20[i][j] = BYTE((i + j + 1) & 1);
+            }
+            g_unk0x0082af78[i] = 60 + i;
+            g_unk0x0082af90[i] = 300000 - i * 12345;
+        }
         char title[] = "save %n test";
         Check(SavedGames_WriteSessionImage(-1, title) == 1, "write actual session");
         char fileName[32];
         snprintf(fileName, sizeof(fileName), "game%05d.rcs", players - 1);
         std::ifstream file(user / "gamesave" / fileName, std::ios::binary);
         std::vector<BYTE> bytes((std::istreambuf_iterator<char>(file)), {});
-        Check(bytes.size() == 0x7f4, "original disk size");
+        Check(bytes.size() == sizeof(SavedGameFileImage), "extended disk size");
         Check(Word(bytes, 0x30) == unsigned(1 | (2 << 7) | (players << 10) | ((players > 1) << 14)), "original packed options");
         Check(!memcmp(bytes.data() + 0x10, title, sizeof(title)), "literal save name at original offset");
         Check(bytes[0xc4] == 'A' && bytes[0xf4] == 0x21 && bytes[0x614] == 0x41, "player records at original offsets");
         Check((Word(bytes, 0xb4) & 0x1fff) == unsigned(1 | (2 << 3) | (3 << 6) | (2 << 8) | (5 << 10)), "original packed setup");
         Check(Word(bytes, 0x7d8) == (5 | (3 << 5)) && bytes[0x7d4] == 2 && bytes[0x7dc] == 1, "original stage and tie break offsets");
         Check(bytes[0x630] == 0x61 && bytes[0x6d0] == 0x62 && bytes[0x720] == 0x63 && bytes[0x734] == 0x64 && bytes[0x784] == 0x65, "original table offsets");
+        const SavedGameServiceState &diskService =
+            ((const SavedGameFileImage *)bytes.data())->service;
+        Check(diskService.magic == SAVED_GAME_SERVICE_MAGIC &&
+              diskService.version == SAVED_GAME_SERVICE_VERSION,
+              "write service extension header");
+        Check(diskService.repairFlags[0][1] == 1 && diskService.repairCars[0].data[0] == 0x70 &&
+              diskService.setupValues[0][3] == 13 && diskService.setupFlags[0][0] == 1 &&
+              diskService.displayedStageTime[0] == 60 && diskService.remainingServiceTime[0] == 300000,
+              "write service extension state");
         SavedGames_LoadRecords();
         Check(SavedGames_GetCount() == players, "enumerate multiple saved games");
         int index = -1;
         for (int i = 0; i < players; i++)
             if (!strcmp((char *)SavedGames_GetFileName(i), fileName)) index = i;
         Check(index >= 0, "find saved file");
-        const SavedGameImage image = *SavedGames_GetRecord(index);
+        const SavedGameImage *listedImage = SavedGames_GetRecord(index);
+        const SavedGameServiceState *listedService = SavedGames_GetServiceState(listedImage);
+        Check(listedService && listedService->repairCars[players - 1].data[0] == 0x70 + players - 1,
+              "enumerate service extension");
+        memset(&g_playerOptionCache, 0, sizeof(g_playerOptionCache));
+        memset(g_unk0x0082bee8, 0, sizeof(g_unk0x0082bee8));
+        memset(g_unk0x0082bf20, 0, sizeof(g_unk0x0082bf20));
+        memset(g_unk0x0082af78, 0, sizeof(g_unk0x0082af78));
+        memset(g_unk0x0082af90, 0, sizeof(g_unk0x0082af90));
+        Check(FrontendProfile_ApplyDriverProfileBlock(listedImage) == 1, "queue extended service state");
+        OptionMenu_LoadRallyRecords();
+        OptionMenu_InitDefaultRecordTables();
+        OptionMenu_InitializeServiceTimes();
+        Check(g_playerOptionCache.dirty[players - 1][1] == BYTE(players & 1) &&
+              g_playerOptionCache.records[players - 1].data[0] == 0x70 + players - 1 &&
+              g_unk0x0082bee8[players - 1][3] == 10 + (players - 1) * 7 + 3 &&
+              g_unk0x0082bf20[players - 1][0] == BYTE(players & 1) &&
+              g_unk0x0082af90[players - 1] == 300000 - (players - 1) * 12345,
+              "restore extended service state");
+        const SavedGameImage image = *listedImage;
         Check(SavedGames_WriteSessionImage(index, nullptr) == 1, "overwrite selected save");
         // Destroy live data before restoring; a reader that skips a field
         // must not pass just because the original value is still in memory.
@@ -173,6 +227,7 @@ int main()
         const unsigned state = CGameInfo::m_gameInfo.field_0x14;
         Check(!FrontendProfile_ApplyDriverProfileBlock(&broken) && CGameInfo::m_gameInfo.field_0x14 == state, "reject zero players without modifying live state");
         Check(!SavedGames_IsValidSessionImage(&image, sizeof(image) - 1), "reject truncated image");
+        Check(SavedGames_IsValidSessionImage(&image, sizeof(image)), "accept legacy save without extension");
         broken.options.playerCount = 5;
         Check(!FrontendProfile_ApplyDriverProfileBlock(&broken), "reject too many players");
         broken = image;
@@ -185,6 +240,13 @@ int main()
         broken.options.playerCount = 0;
         Write(user / "gamesave" / "broken.rcs", &broken, sizeof(broken));
         Write(user / "gamesave" / "short.rcs", &image, 8);
+        SavedGameFileImage badExtension{};
+        badExtension.legacy = image;
+        badExtension.service.magic = SAVED_GAME_SERVICE_MAGIC;
+        badExtension.service.version = SAVED_GAME_SERVICE_VERSION;
+        badExtension.service.size = sizeof(SavedGameServiceState);
+        badExtension.service.repairFlags[0][0] = 2;
+        Write(user / "gamesave" / "bad-extension.rcs", &badExtension, sizeof(badExtension));
         SavedGames_LoadRecords();
         Check(SavedGames_GetCount() == players, "ignore damaged files in menu listing");
         Check(SavedGames_GetRecord(-1) == nullptr && SavedGames_GetRecord(players) == nullptr, "reject invalid selection");
@@ -192,5 +254,5 @@ int main()
     SavedGames_ReleaseRecords();
     Platform_Shutdown();
     fs::remove_all(root);
-    puts("saved game: original layout, 1-4 players, write/list/overwrite/load and damaged files passed");
+    puts("saved game: legacy layout, service extension, 1-4 players and damaged files passed");
 }

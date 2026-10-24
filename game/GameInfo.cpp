@@ -1824,6 +1824,21 @@ bool SavedGames_ReleaseRecords(void);
 void NetPlayers_SendCarClass(BYTE carClass);
 HRESULT Sound_StartLoopingMusicStream(int param1);
 
+void OptionMenu_InitializeServiceTimes(void)
+{
+    for (int i = 0; i < (int)(CGameInfo::GetConfiguredPlayerCount() & 0xff); i++) {
+        if (g_unk0x00527000) {
+            g_unk0x0082af90[i] = 360000;
+            g_unk0x0082af78[i] = 0x3c;
+        } else {
+            g_unk0x0082af90[i] = 360000;
+            g_unk0x0082af78[i] = 0x3c;
+        }
+    }
+    // Extended saves override the defaults only after they exist.
+    SavedGames_RestorePendingServiceState();
+}
+
 // Starts the option menu state: rebuilds the option records, starts the menu
 // music and asks for the next state (level 2) of the grouped callback machine.
 // FUNCTION: CMR2 0x00500c80
@@ -1863,15 +1878,7 @@ void OptionMenu_EnterStartState(CallbackStateMachine *p1, BYTE state)
     // The original re-reads the flag before each pair of stores: both arms of
     // the conditional hold the same value, so the branch is gone from the
     // binary but the load and its test are still there.
-    for (i = 0; i < (int)(CGameInfo::GetConfiguredPlayerCount() & 0xff); i = i + 1) {
-        if (g_unk0x00527000) {
-            g_unk0x0082af90[i] = 360000;
-            g_unk0x0082af78[i] = 0x3c;
-        } else {
-            g_unk0x0082af90[i] = 360000;
-            g_unk0x0082af78[i] = 0x3c;
-        }
-    }
+    OptionMenu_InitializeServiceTimes();
 
     sprintf(path, g_str0x0052703c, CInstallInfo::GetMusicDir());
     CSound::OpenStreamingMusicFile(path);
@@ -3026,6 +3033,7 @@ void FrontendMenu_UpdateSoundOptions(Menu *pMenu)
 
 // GLOBAL: CMR2 0x0081b14c
 SavedGameImage *g_unk0x0081b14c;
+SavedGameServiceState *g_savedGameServiceStates;
 // GLOBAL: CMR2 0x0081b150
 char **g_unk0x0081b150;
 // GLOBAL: CMR2 0x0081b154
@@ -3070,6 +3078,17 @@ const SavedGameImage *SavedGames_GetRecord(int index)
     return &g_unk0x0081b14c[index];
 }
 
+const SavedGameServiceState *SavedGames_GetServiceState(const SavedGameImage *image)
+{
+    if (image == NULL || g_savedGameServiceStates == NULL)
+        return NULL;
+    for (int i = 0; i < g_unk0x0081b154; i++)
+        if (image == &g_unk0x0081b14c[i] &&
+            g_savedGameServiceStates[i].magic == SAVED_GAME_SERVICE_MAGIC)
+            return &g_savedGameServiceStates[i];
+    return NULL;
+}
+
 // FUNCTION: CMR2 0x004f4e70
 void *SavedGames_GetFileName(int index)
 {
@@ -3091,10 +3110,13 @@ bool SavedGames_ReleaseRecords(void)
         CFileBuffer::FreeGenericFileBuffer(g_unk0x0081b14c);
         g_unk0x0081b14c = NULL;
     }
+    if (g_savedGameServiceStates != NULL)
+        CFileBuffer::FreeGenericFileBuffer(g_savedGameServiceStates);
     if (g_unk0x0081b150 != NULL)
         CFileBuffer::FreeGenericFileBuffer(g_unk0x0081b150);
     g_unk0x0081b14c = NULL;
     g_unk0x0081b150 = NULL;
+    g_savedGameServiceStates = NULL;
     g_unk0x0081b154 = 0;
     return true;
 }
@@ -3164,6 +3186,12 @@ static int SavedGames_AddListedFile(const char *name, void *pDir)
     if (pRecord != NULL) {
         g_unk0x0081b14c = (SavedGameImage *)CFileBuffer::ReallocateLockedBuffer(g_unk0x0081b14c, (g_unk0x0081b154 + 1) * sizeof(SavedGameImage));
         g_unk0x0081b14c[g_unk0x0081b154] = *(SavedGameImage *)pRecord;
+        g_savedGameServiceStates = (SavedGameServiceState *)CFileBuffer::ReallocateLockedBuffer(
+            g_savedGameServiceStates, (g_unk0x0081b154 + 1) * sizeof(SavedGameServiceState));
+        if (CGenericFileLoader::m_fileSize == sizeof(SavedGameFileImage))
+            g_savedGameServiceStates[g_unk0x0081b154] = ((SavedGameFileImage *)pRecord)->service;
+        else
+            memset(&g_savedGameServiceStates[g_unk0x0081b154], 0, sizeof(SavedGameServiceState));
         g_unk0x0081b150 = (char **)CFileBuffer::ReallocateLockedBuffer(g_unk0x0081b150, (g_unk0x0081b154 + 1) * sizeof(*g_unk0x0081b150));
         g_unk0x0081b150[g_unk0x0081b154] = (char *)CFileBuffer::AllocateLockedBuffer(0x100);
         strcpy((char *)g_unk0x0081b150[g_unk0x0081b154], name);
@@ -10408,20 +10436,65 @@ extern unsigned int OptionMenu_GetRecordPercentage(int index, int type, int dyna
 extern void OptionPreview_RestoreOriginalMeshVertices(int index);
 extern int g_unk0x005270b8[11];
 
-// One object owns the entire original disk image; unrelated globals need not
-// be adjacent or have the same alignment as the original executable.
+// One object owns the original disk image and OpenCMR2's optional service-area
+// trailer; the legacy portion remains byte-for-byte at its original offsets.
 // GLOBAL: CMR2 0x0081a858
-static SavedGameImage g_savedGameImage;
+static SavedGameFileImage g_savedGameFileImage;
+static SavedGameServiceState g_pendingSavedServiceState;
+static bool g_hasPendingSavedServiceState;
 // GLOBAL: CMR2 0x00525c20
 char g_str0x00525c20[] = "%s\\gamesave\\%s";
+
+static void SavedGames_CaptureServiceState(SavedGameServiceState *service)
+{
+    memset(service, 0, sizeof(*service));
+    service->magic = SAVED_GAME_SERVICE_MAGIC;
+    service->version = SAVED_GAME_SERVICE_VERSION;
+    service->size = sizeof(*service);
+    for (unsigned i = 0; i < CGameInfo::GetConfiguredPlayerCount(); i++) {
+        memcpy(service->repairFlags[i], g_playerOptionCache.dirty[i], sizeof(service->repairFlags[i]));
+        memcpy(&service->repairCars[i], &g_playerOptionCache.records[i], sizeof(service->repairCars[i]));
+        memcpy(service->setupValues[i], g_unk0x0082bee8[i], sizeof(service->setupValues[i]));
+        memcpy(service->setupFlags[i], g_unk0x0082bf20[i], sizeof(service->setupFlags[i]));
+        service->displayedStageTime[i] = g_unk0x0082af78[i];
+        service->remainingServiceTime[i] = g_unk0x0082af90[i];
+    }
+}
+
+void SavedGames_QueueServiceState(const SavedGameImage *image)
+{
+    const SavedGameServiceState *service = SavedGames_GetServiceState(image);
+    g_hasPendingSavedServiceState = service != NULL;
+    if (service != NULL)
+        g_pendingSavedServiceState = *service;
+}
+
+void SavedGames_RestorePendingServiceState(void)
+{
+    if (!g_hasPendingSavedServiceState)
+        return;
+    for (unsigned i = 0; i < CGameInfo::GetConfiguredPlayerCount(); i++) {
+        memcpy(g_playerOptionCache.dirty[i], g_pendingSavedServiceState.repairFlags[i],
+               sizeof(g_pendingSavedServiceState.repairFlags[i]));
+        memcpy(&g_playerOptionCache.records[i], &g_pendingSavedServiceState.repairCars[i],
+               sizeof(g_pendingSavedServiceState.repairCars[i]));
+        memcpy(g_unk0x0082bee8[i], g_pendingSavedServiceState.setupValues[i],
+               sizeof(g_pendingSavedServiceState.setupValues[i]));
+        memcpy(g_unk0x0082bf20[i], g_pendingSavedServiceState.setupFlags[i],
+               sizeof(g_pendingSavedServiceState.setupFlags[i]));
+        g_unk0x0082af78[i] = g_pendingSavedServiceState.displayedStageTime[i];
+        g_unk0x0082af90[i] = g_pendingSavedServiceState.remainingServiceTime[i];
+    }
+    g_hasPendingSavedServiceState = false;
+}
 
 // Builds the original session image. A name creates a new file; otherwise
 // the selected file is overwritten, preserving its displayed name.
 // FUNCTION: CMR2 0x004f5190
 BYTE SavedGames_WriteSessionImage(int index, const char *name)
 {
-    SavedGameImage &image = g_savedGameImage;
-    memset(&image, 0, sizeof(image));
+    SavedGameImage &image = g_savedGameFileImage.legacy;
+    memset(&g_savedGameFileImage, 0, sizeof(g_savedGameFileImage));
     if (CGameInfo::GetConfiguredPlayerCount() < 1 || CGameInfo::GetConfiguredPlayerCount() > 4)
         return 0;
     RallyData_CopyDriverStageTimesToRecords();
@@ -10462,6 +10535,7 @@ BYTE SavedGames_WriteSessionImage(int index, const char *name)
     image.stage.country = RallyDataCountryIndex();
     image.stage.stage = RallyDataStageIndex();
     image.selectionState = RallyData_GetSelectionStateByte();
+    SavedGames_CaptureServiceState(&g_savedGameFileImage.service);
 
     if (name != NULL) {
         _snprintf(image.name, sizeof(image.name), "%s", name);
@@ -10474,9 +10548,10 @@ BYTE SavedGames_WriteSessionImage(int index, const char *name)
     } else {
         return 0;
     }
-    if (!SavedGames_IsValidSessionImage(&image, sizeof(image)))
+    if (!SavedGames_IsValidSessionImage(&g_savedGameFileImage, sizeof(g_savedGameFileImage)))
         return 0;
-    return CInstallInfo::WriteFileToDisk(CFrontend::m_stringDest, 0, &image, sizeof(image)) == 1;
+    return CInstallInfo::WriteFileToDisk(CFrontend::m_stringDest, 0, &g_savedGameFileImage,
+                                         sizeof(g_savedGameFileImage)) == 1;
 }
 
 // Loads the highlighted saved game into the frontend and moves to the game

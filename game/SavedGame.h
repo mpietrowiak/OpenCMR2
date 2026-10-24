@@ -115,6 +115,28 @@ struct SavedGameImage {
     BYTE reserved2[8];
 };
 
+// OpenCMR2 extension appended to the untouched original 0x7f4-byte image.
+// The legacy game data remains at the same offsets, while the trailer keeps
+// the service-area state that the original format omitted.
+enum { SAVED_GAME_SERVICE_MAGIC = 0x31564353, SAVED_GAME_SERVICE_VERSION = 1 };
+
+struct SavedGameServiceState {
+    unsigned int magic;
+    unsigned short version;
+    unsigned short size;
+    BYTE repairFlags[4][12];
+    SavedGameCarRecord repairCars[4];
+    BYTE setupValues[4][7];
+    BYTE setupFlags[4][7];
+    int displayedStageTime[4];
+    int remainingServiceTime[4];
+};
+
+struct SavedGameFileImage {
+    SavedGameImage legacy;
+    SavedGameServiceState service;
+};
+
 // These disk-layout checks apply on every platform, including 64-bit builds.
 typedef char SavedGameLayoutCheck1[(sizeof(SavedGameOptions) == 4) ? 1 : -1];
 typedef char SavedGameLayoutCheck2[(sizeof(SavedGameDriver) == 8) ? 1 : -1];
@@ -138,10 +160,15 @@ typedef char SavedGameLayoutCheck19[(offsetof(SavedGameImage, secondaryValues) =
 typedef char SavedGameLayoutCheck20[(offsetof(SavedGameImage, selectionState) == 0x7d4) ? 1 : -1];
 typedef char SavedGameLayoutCheck21[(offsetof(SavedGameImage, stage) == 0x7d8) ? 1 : -1];
 typedef char SavedGameLayoutCheck22[(offsetof(SavedGameImage, tieBreak) == 0x7dc) ? 1 : -1];
+typedef char SavedGameLayoutCheck23[(sizeof(SavedGameServiceState) == 0x5b0) ? 1 : -1];
+typedef char SavedGameLayoutCheck24[(offsetof(SavedGameFileImage, service) == 0x7f4) ? 1 : -1];
 
 bool SavedGames_IsValidSessionImage(const void *buffer, size_t size);
 BYTE SavedGames_WriteSessionImage(int index, const char *name);
 const SavedGameImage *SavedGames_GetRecord(int index);
+const SavedGameServiceState *SavedGames_GetServiceState(const SavedGameImage *image);
+void SavedGames_QueueServiceState(const SavedGameImage *image);
+void SavedGames_RestorePendingServiceState(void);
 unsigned int FrontendProfile_ApplyDriverProfileBlock(const SavedGameImage *image);
 
 #endif
