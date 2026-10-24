@@ -127,6 +127,11 @@ int g_unk0x00538108;
 BYTE g_unk0x0053810c;
 // GLOBAL: CMR2 0x0053810d
 BYTE g_unk0x0053810d;
+
+// OpenCMR2 extension: the original championship restart path always returns
+// to the first stage of the rally.  Keep a separate latch so the pause menu
+// can also request the ordinary teardown/reload path for the current stage.
+static BYTE g_restartChampionshipStage;
 // GLOBAL: CMR2 0x00538114
 int g_unk0x00538114;
 // GLOBAL: CMR2 0x00538118
@@ -382,6 +387,12 @@ int Race_ReadState37F60(void)
 // FUNCTION: CMR2 0x0041f280
 void Race_SetFlag3810C(void)
 {
+    g_unk0x0053810c = 1;
+}
+
+void Race_RequestChampionshipStageRestart(void)
+{
+    g_restartChampionshipStage = 1;
     g_unk0x0053810c = 1;
 }
 
@@ -3349,6 +3360,11 @@ void Race_HandleStageReplayViewTransitions(CallbackStateMachine *param1, unsigne
         StageUI_ResetRaceEndEventCount();
         switch (CGameInfo::GetConfiguredGameMode()) {
         case 0:
+            if (g_restartChampionshipStage != 0) {
+                g_restartChampionshipStage = 0;
+                Race_TeardownStage(pPlayers, param2, 1);
+                return;
+            }
             if (RallyDataStageIndex() ==
                 (BYTE)RallyData_GetModeStageGroup(RallyDataCountryIndex(), CGameInfo::GetConfiguredDifficulty()))
                 RallyTiming_AddStagePenalties();

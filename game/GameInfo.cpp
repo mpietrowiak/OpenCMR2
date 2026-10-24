@@ -3753,6 +3753,9 @@ extern BYTE g_unk0x0052af58[2];
 Menu g_menu0x00529918;
 // GLOBAL: CMR2 0x00529af8
 Menu g_menu0x00529af8;
+// OpenCMR2 extension: confirmation page for restarting only the current
+// championship stage (the original page restarts the whole rally).
+Menu g_championshipStageRestartMenu;
 // GLOBAL: CMR2 0x00529ce8
 Menu g_menu0x00529ce8;
 // GLOBAL: CMR2 0x00529ed8
@@ -4779,6 +4782,7 @@ int g_unk0x00516084 = 0x80fafafa;
 int g_unk0x0051608c = 0xbfae8072;
 
 void GameMenu_RequestStageRestart(Menu *pMenu, int param);
+void GameMenu_RequestChampionshipStageRestart(Menu *pMenu, int param);
 void GameMenu_RequestNetworkRestart(Menu *pMenu, int param);
 void GameMenu_RequestNetworkQuit(Menu *pMenu, int param);
 void GameMenu_RequestNetworkLeave(Menu *pMenu, int param);
@@ -5128,6 +5132,8 @@ void InRaceMenu_RebuildMainPage(int param)
         if (Network_GetSessionStateFlag() != 0)
             Menu_AddItemType2(&g_menu0x0052ad60, 0, 0xf6, &g_menu0x0052a2a8, 0, 5);
     } else {
+        if (CGameInfo::GetConfiguredGameMode() == 0)
+            Menu_AddItemType2(&g_menu0x0052ad60, 0, 0xf, &g_championshipStageRestartMenu, 0, 4);
         Menu_AddItemType2(&g_menu0x0052ad60, 0, 0xf, &g_menu0x00529af8, 0, 3);
     }
     Menu_AddItemType2(&g_menu0x0052ad60, 0, 0x11, &g_menu0x0052a0c0, 0, 6);
@@ -5203,6 +5209,14 @@ void InRaceMenu_BuildSoundOptions(void)
 // FUNCTION: CMR2 0x00403370
 void InRaceMenu_BuildPausePage(void)
 {
+    Menu_Init(&g_championshipStageRestartMenu, 0, 0, 0, &g_menu0x0052ad60, NULL, 1, 0, 1);
+    Menu_AddItemType4(&g_championshipStageRestartMenu, 0, 0xf,
+                      (MenuItemAction)GameMenu_RequestChampionshipStageRestart, 4);
+    Menu_AddItemType1(&g_championshipStageRestartMenu, 0, 0xa6, 0, -1);
+    Menu_SetCallbacks(&g_championshipStageRestartMenu, (MenuCallback)InRaceMenu_SelectLastItem, NULL,
+                      (MenuCallback)InRaceMenu_DrawMenuRows, NULL);
+    Menu_ValidateCursor(&g_championshipStageRestartMenu, 0);
+
     Menu_Init(&g_menu0x00529af8, 0, 0, 0, &g_menu0x0052ad60, NULL, 1, 0, 1);
     Menu_AddItemType4(&g_menu0x00529af8, 0, 0xf, (MenuItemAction)GameMenu_RequestStageRestart, 3);
     if (CGameInfo::GetConfiguredGameMode() == 2 || CGameInfo::GetConfiguredGameMode() == 3 ||

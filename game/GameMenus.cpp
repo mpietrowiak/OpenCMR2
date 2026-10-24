@@ -119,6 +119,7 @@ int Network_CloseSession(void);
 void Game_RequestOptionRefresh(void);
 void Race_SetFlag3810C(void);
 void Race_SetFlag37FFA(void);
+void Race_RequestChampionshipStageRestart(void);
 void Race_SetFlag3810D(void);
 void Race_ClearState38118(void);
 void InRaceMenu_Close(void);
@@ -179,6 +180,18 @@ void GameMenu_FinishNetworkCloseFade(BYTE index)
 
     PROMOTE_CARS();
     Race_SetFlag3810C();
+    InRaceMenu_Close();
+}
+
+// Fade callback for OpenCMR2's championship-only "restart stage" command.
+// Unlike the original restart command, this selects the ordinary stage
+// teardown path and leaves the current rally progress intact.
+void GameMenu_FinishChampionshipStageRestartFade(BYTE index)
+{
+    BYTE i;
+
+    PROMOTE_CARS();
+    Race_RequestChampionshipStageRestart();
     InRaceMenu_Close();
 }
 
@@ -244,6 +257,16 @@ void GameMenu_RequestStageRestart(Menu *pMenu, int param)
         NetPlayers_ClearReadyFlags();
         NetRace_SendType14AndClearRaceFlag();
     }
+}
+
+void GameMenu_RequestChampionshipStageRestart(Menu *pMenu, int param)
+{
+    BYTE i;
+
+    for (i = 0; (short)i < Car_GetOrderCount(); i++)
+        NetRace_FadeOutPlayerScreen(i,
+                                    i != 0 ? NULL : (FadeCallback)GameMenu_FinishChampionshipStageRestartFade,
+                                    1, 0, g_netMenuFadeColour, 1);
 }
 
 // Item callback of the network "restart" item: fades every car out.
